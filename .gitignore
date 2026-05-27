@@ -1,0 +1,5 @@
+/target
+
+# Local config containing real API keys — never commit.
+# Use config.toml.example as the template.
+/config.toml

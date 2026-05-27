@@ -1,0 +1,12 @@
+model_provider = "openai"
+# Which model to send. Each provider supports a different name space.
+model = "gpt-5.5"
+
+# -----------------------------------------------------------------------------
+# Built-in OpenAI provider (Responses API). Standard codex shape.
+# -----------------------------------------------------------------------------
+[model_providers.openai]
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+api_key = "sk-xxx"
+wire_api = "responses"
