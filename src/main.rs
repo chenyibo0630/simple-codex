@@ -30,7 +30,7 @@ use types::{ApiError, BaseInstructions, ContentItem, Prompt, ResponseEvent, Resp
 async fn main() -> Result<(), ApiError> {
     // Mirrors codex's config loading flow: read TOML → resolve provider id
     // against `model_providers.<id>` → pick API key from env (or direct fallback).
-    let cfg = ConfigToml::load(Path::new("config.toml"))?.resolve()?;
+    let cfg: config::ResolvedConfig = ConfigToml::load(Path::new("config.toml"))?.resolve()?;
     eprintln!(
         "[config] provider={} ({}) model={} wire_api={:?}",
         cfg.provider_id, cfg.provider_display_name, cfg.model, cfg.wire_api
@@ -38,9 +38,7 @@ async fn main() -> Result<(), ApiError> {
 
     let client = ModelClient::new(cfg.api_key, cfg.base_url, cfg.model);
 
-    // Mirrors: codex-rs/core/src/client_common.rs:25  `pub struct Prompt`.
-    // `..Default::default()` fills tools / parallel_tool_calls / personality /
-    // output_schema* with codex's defaults (`impl Default for Prompt`).
+    // Mirrors: codex-rs/core/src/client_common.rs
     let prompt = Prompt {
         base_instructions: BaseInstructions {
             text: "You are a helpful assistant.".to_string(),
@@ -54,11 +52,8 @@ async fn main() -> Result<(), ApiError> {
         ..Default::default()
     };
 
-    // Dispatch on `wire_api`, matching codex's branch at
-    // codex-rs/core/src/client.rs:1559 `match wire_api { WireApi::Responses => ... }`.
-    // Codex now only has the Responses arm; the Chat arm is a simple-codex
-    // extension (see `CHAT_WIRE_API_REMOVED_ERROR` in
-    // codex-rs/model-provider-info/src/lib.rs:45).
+    // Mirrors: codex-rs/core/src/client.rs fn:stream
+    // stream_chat Deprecated in codex now
     let mut rx = match cfg.wire_api {
         WireApi::Responses => client.stream(&prompt).await?,
         WireApi::Chat => client.stream_chat(&prompt).await?,

@@ -3,8 +3,6 @@ name = "simple-codex"
 version = "0.1.0"
 edition = "2024"
 
-# Dependency versions mirror codex's workspace
-# (see codex-rs/Cargo.toml `[workspace.dependencies]`).
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls"] }
