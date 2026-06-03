@@ -1,15 +1,13 @@
 //! Minimal HTTP+SSE model client.
 //!
 //! Source map:
-//! - `build_responses_request` : codex-rs/core/src/client.rs:709
-//! - `ModelClientSession::stream` (SSE branch only)
-//!                            : codex-rs/core/src/client.rs:1547
-//! - `Accept: text/event-stream` header
-//!                            : codex-rs/codex-api/src/endpoint/responses.rs:139
-//! - `spawn_response_stream`  : codex-rs/codex-api/src/sse/responses.rs:29
+//! - `ModelClient`            : codex-rs/core/src/client.rs (持有 Provider)
+//! - `build_responses_request`: codex-rs/core/src/client.rs:709
+//! - `stream` dispatch        : codex-rs/core/src/client.rs:1547
+//!                              (按 `provider.wire_api` 选 Responses/Chat 分支)
+//! - SSE 启动                 : codex-rs/codex-api/src/sse/responses.rs:29
 //!
-//! The WebSocket branch (`responses_websocket_enabled` path in client.rs:1561)
-//! is intentionally omitted; this reproduction only exercises HTTP+SSE.
+//! WebSocket / 重试 / fallback 路径全部省略。
 
 use std::time::Duration;
 
@@ -17,10 +15,12 @@ use futures::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use tokio::sync::mpsc;
 
+use simple_codex_core::config::WireApi;
 use simple_codex_core::types::{
     ApiError, ContentItem, Prompt, ResponseEvent, ResponseItem,
 };
 
+use crate::provider::Provider;
 use crate::sse::{process_chat_sse, process_sse};
 use crate::wire::{ByteStream, ChatCompletionsRequest, ChatMessage, ResponsesApiRequest};
 
@@ -30,26 +30,40 @@ const RESPONSE_STREAM_CHANNEL_CAPACITY: usize = 64;
 
 pub struct ModelClient {
     pub api_key: String,
-    pub base_url: String,
+    pub provider: Provider,
     pub model: String,
     pub http: reqwest::Client,
     pub idle_timeout: Duration,
 }
 
 impl ModelClient {
-    pub fn new(api_key: String, base_url: String, model: String) -> Self {
+    pub fn new(api_key: String, provider: Provider, model: String) -> Self {
         Self {
             api_key,
-            base_url,
+            provider,
             model,
             http: reqwest::Client::new(),
-            // codex's default is 5 min; we use 30 s for a fast-fail demo.
+            // codex 默认 5 min;这里 30 s 让 demo fail-fast。
             // codex source: codex-rs/model-provider-info/src/lib.rs:26
             idle_timeout: Duration::from_secs(30),
         }
     }
 
-    /// Mirrors: codex-rs/core/src/client.rs:709  `build_responses_request`
+    /// 统一流式入口。按 `provider.wire_api` 内部分发到 Responses / Chat。
+    ///
+    /// 对齐 codex-rs/core/src/client.rs:1547 `ModelClientSession::stream` —— 调用方
+    /// 永远只看到一个 `stream`,protocol 选择由 client 持有的 provider 决定。
+    pub async fn stream(
+        &self,
+        prompt: &Prompt,
+    ) -> Result<mpsc::Receiver<Result<ResponseEvent, ApiError>>, ApiError> {
+        match self.provider.wire_api {
+            WireApi::Responses => self.stream_responses(prompt).await,
+            WireApi::Chat => self.stream_chat(prompt).await,
+        }
+    }
+
+    /// Mirrors: codex-rs/core/src/client.rs:709 `build_responses_request`
     fn build_responses_request(&self, prompt: &Prompt) -> ResponsesApiRequest {
         // Mirrors: codex-rs/core/src/client.rs:738 `create_text_param_for_request`
         let text = prompt.output_schema.as_ref().map(|schema| {
@@ -68,22 +82,22 @@ impl ModelClient {
             tools: prompt.tools.clone(),
             parallel_tool_calls: prompt.parallel_tool_calls,
             stream: true,
-            // Mirrors line 754: `store: provider.is_azure_responses_endpoint()`.
+            // Mirrors line 754: `store: provider.is_azure_responses_endpoint()`
             store: false,
             text,
         }
     }
 
-    /// Mirrors: codex-rs/core/src/client.rs:1547  `ModelClientSession::stream`
-    /// (HTTP+SSE branch only).
-    pub async fn stream(
+    /// POST `/responses` 分支。
+    async fn stream_responses(
         &self,
         prompt: &Prompt,
     ) -> Result<mpsc::Receiver<Result<ResponseEvent, ApiError>>, ApiError> {
         let body = self.build_responses_request(prompt);
-        // OpenAI SDK convention: `base_url` already carries the API version
-        // prefix (e.g. `/v1`), so we only append `/responses` here.
-        let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/responses",
+            self.provider.base_url.trim_end_matches('/')
+        );
 
         let response = self
             .http
@@ -104,7 +118,7 @@ impl ModelClient {
 
         let byte_stream: ByteStream = response.bytes_stream().boxed();
 
-        // Mirrors: codex-rs/codex-api/src/sse/responses.rs:29  `spawn_response_stream`
+        // Mirrors: codex-rs/codex-api/src/sse/responses.rs:29 `spawn_response_stream`
         let (tx_event, rx_event) = mpsc::channel(RESPONSE_STREAM_CHANNEL_CAPACITY);
         let idle = self.idle_timeout;
         tokio::spawn(async move {
@@ -113,8 +127,8 @@ impl ModelClient {
         Ok(rx_event)
     }
 
-    /// Extension beyond codex: stream via `POST /v1/chat/completions`.
-    pub async fn stream_chat(
+    /// POST `/chat/completions` 分支(codex 之外的扩展)。
+    async fn stream_chat(
         &self,
         prompt: &Prompt,
     ) -> Result<mpsc::Receiver<Result<ResponseEvent, ApiError>>, ApiError> {
@@ -126,7 +140,7 @@ impl ModelClient {
         };
         let url = format!(
             "{}/chat/completions",
-            self.base_url.trim_end_matches('/')
+            self.provider.base_url.trim_end_matches('/')
         );
 
         let response = self
@@ -156,8 +170,8 @@ impl ModelClient {
     }
 }
 
-/// Translate the codex-style `Prompt` (`Vec<ResponseItem>` + system text) into
-/// the OpenAI chat-completions `messages` array.
+/// 把 codex 风格 `Prompt` (`Vec<ResponseItem>` + system text) 翻译成 OpenAI
+/// chat-completions 的 `messages` 数组。
 fn build_chat_messages(prompt: &Prompt) -> Vec<ChatMessage> {
     let mut messages = Vec::new();
     if !prompt.base_instructions.text.is_empty() {

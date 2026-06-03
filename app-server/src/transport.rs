@@ -1,13 +1,15 @@
 //! 把内部 `Op` → `Prompt` → 上游 `ResponseEvent` 流 → 下游 `EventMsg` SSE 流。
 //!
-//! 仅一个对外函数 `stream_chat`，由 `routes::chat_handler` 调用。
+//! 仅一个对外函数 `stream_chat`,由 `routes::chat_handler` 调用。
+//! 注意:这里的 `stream_chat` 是 HTTP transport 层名字(承载一次 chat 会话),
+//! 与 `ModelClient` 的 wire-protocol 选择无关——后者由 `client.provider.wire_api`
+//! 在 client 内部决定。
 
 use std::convert::Infallible;
 
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use futures::stream::Stream;
 
-use simple_codex_core::config::WireApi;
 use simple_codex_core::types::{BaseInstructions, ContentItem, Prompt, ResponseEvent, ResponseItem};
 
 use crate::protocol::{EventMsg, Op};
@@ -18,10 +20,7 @@ pub async fn stream_chat(
     op: Op,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let prompt = build_prompt(&state.system_prompt, &op);
-    let stream_result = match state.wire_api {
-        WireApi::Responses => state.client.stream(&prompt).await,
-        WireApi::Chat => state.client.stream_chat(&prompt).await,
-    };
+    let stream_result = state.client.stream(&prompt).await;
 
     let s = async_stream::stream! {
         yield emit(EventMsg::TaskStarted);
@@ -38,7 +37,7 @@ pub async fn stream_chat(
         while let Some(event) = rx.recv().await {
             match event {
                 Ok(ResponseEvent::Created) => {
-                    // 已经发过 TaskStarted，这里跳过。
+                    // 已经发过 TaskStarted,这里跳过。
                 }
                 Ok(ResponseEvent::OutputTextDelta(delta)) => {
                     buffered.push_str(&delta);
@@ -64,7 +63,7 @@ pub async fn stream_chat(
 
 fn emit(msg: EventMsg) -> Result<SseEvent, Infallible> {
     let name = msg.event_name();
-    // `.json_data` 失败仅当 serialize 失败；EventMsg 全是 String 字段，不会失败。
+    // `.json_data` 失败仅当 serialize 失败;EventMsg 全是 String 字段,不会失败。
     let evt = SseEvent::default().event(name).json_data(&msg).unwrap();
     Ok(evt)
 }
