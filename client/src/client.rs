@@ -17,16 +17,15 @@ use futures::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use tokio::sync::mpsc;
 
-use crate::sse::{process_chat_sse, process_sse};
-use crate::types::{
-    ApiError, ByteStream, ChatCompletionsRequest, ChatMessage, ContentItem, Prompt, ResponseEvent,
-    ResponseItem, ResponsesApiRequest,
+use simple_codex_core::types::{
+    ApiError, ContentItem, Prompt, ResponseEvent, ResponseItem,
 };
+
+use crate::sse::{process_chat_sse, process_sse};
+use crate::wire::{ByteStream, ChatCompletionsRequest, ChatMessage, ResponsesApiRequest};
 
 /// Mirrors: codex-rs/core/src/client.rs:1712
 /// `const RESPONSE_STREAM_CHANNEL_CAPACITY: usize = 1600;`
-/// (Kept smaller here because a single "hello" reply needs only a handful of
-/// deltas.)
 const RESPONSE_STREAM_CHANNEL_CAPACITY: usize = 64;
 
 pub struct ModelClient {
@@ -46,17 +45,13 @@ impl ModelClient {
             http: reqwest::Client::new(),
             // codex's default is 5 min; we use 30 s for a fast-fail demo.
             // codex source: codex-rs/model-provider-info/src/lib.rs:26
-            // `DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000`.
             idle_timeout: Duration::from_secs(30),
         }
     }
 
     /// Mirrors: codex-rs/core/src/client.rs:709  `build_responses_request`
-    /// Translates the host-side `Prompt` into the OpenAI wire payload.
-    pub fn build_responses_request(&self, prompt: &Prompt) -> ResponsesApiRequest {
-        // Mirrors: codex-rs/core/src/client.rs:738
-        // `create_text_param_for_request(verbosity, schema, strict)` —
-        // simplified to only carry the structured-output schema when present.
+    fn build_responses_request(&self, prompt: &Prompt) -> ResponsesApiRequest {
+        // Mirrors: codex-rs/core/src/client.rs:738 `create_text_param_for_request`
         let text = prompt.output_schema.as_ref().map(|schema| {
             serde_json::json!({
                 "format": {
@@ -73,10 +68,7 @@ impl ModelClient {
             tools: prompt.tools.clone(),
             parallel_tool_calls: prompt.parallel_tool_calls,
             stream: true,
-            // Mirrors line 754:
-            // `store: provider.is_azure_responses_endpoint()`.
-            // For plain OpenAI / OpenAI-compatible endpoints this is `false`,
-            // matching codex's choice for the ChatGPT-auth + API-key paths.
+            // Mirrors line 754: `store: provider.is_azure_responses_endpoint()`.
             store: false,
             text,
         }
@@ -84,22 +76,15 @@ impl ModelClient {
 
     /// Mirrors: codex-rs/core/src/client.rs:1547  `ModelClientSession::stream`
     /// (HTTP+SSE branch only).
-    ///
-    /// Returns an `mpsc::Receiver<Result<ResponseEvent, ApiError>>` populated
-    /// by a background task running `process_sse` — same pattern as
-    /// `spawn_response_stream` in codex-rs/codex-api/src/sse/responses.rs:29.
     pub async fn stream(
         &self,
         prompt: &Prompt,
     ) -> Result<mpsc::Receiver<Result<ResponseEvent, ApiError>>, ApiError> {
         let body = self.build_responses_request(prompt);
         // OpenAI SDK convention: `base_url` already carries the API version
-        // prefix (e.g. `/v1`), so we only append `/responses` here. Set
-        // `OPENAI_BASE_URL=https://api.openai.com/v1` for the official endpoint.
+        // prefix (e.g. `/v1`), so we only append `/responses` here.
         let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
 
-        // Mirrors: codex-rs/codex-api/src/endpoint/responses.rs:139
-        // `headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));`
         let response = self
             .http
             .post(&url)
@@ -117,11 +102,6 @@ impl ModelClient {
             return Err(ApiError::Stream(format!("HTTP {status}: {text}")));
         }
 
-        // Reqwest's `bytes_stream()` returns the body as
-        // `impl Stream<Item = Result<Bytes, reqwest::Error>>`; we box it into
-        // codex's `ByteStream` alias (see types.rs) before handing it to
-        // `process_sse`, matching codex-rs/codex-api/src/sse/responses.rs:807
-        // `let stream: ByteStream = Box::pin(stream);`.
         let byte_stream: ByteStream = response.bytes_stream().boxed();
 
         // Mirrors: codex-rs/codex-api/src/sse/responses.rs:29  `spawn_response_stream`
@@ -134,9 +114,6 @@ impl ModelClient {
     }
 
     /// Extension beyond codex: stream via `POST /v1/chat/completions`.
-    /// Same overall shape as `stream` but uses the chat completions wire
-    /// format so we can talk to providers that don't host the Responses API
-    /// (Tencent LKE, DeepSeek, Qwen, OpenRouter chat-only models, etc.).
     pub async fn stream_chat(
         &self,
         prompt: &Prompt,
@@ -147,10 +124,6 @@ impl ModelClient {
             messages,
             stream: true,
         };
-        // Same convention as `stream`: caller's `base_url` carries the API
-        // version prefix; we only append `/chat/completions`. Mirrors the
-        // OpenAI Python/Node SDKs (e.g. Tencent LKE uses
-        // `https://api.lkeap.cloud.tencent.com/plan/v3` as the prefix).
         let url = format!(
             "{}/chat/completions",
             self.base_url.trim_end_matches('/')

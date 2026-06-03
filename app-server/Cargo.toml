@@ -1,0 +1,20 @@
+[package]
+name = "simple-codex-app-server"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "simple-codex-server"
+path = "src/main.rs"
+
+[dependencies]
+simple-codex-core = { workspace = true }
+simple-codex-client = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+async-stream = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
